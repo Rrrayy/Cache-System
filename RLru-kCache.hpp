@@ -11,6 +11,7 @@ namespace RrCache{
             int k_;//进入缓存的评判标准，如果数据被访问k次，则可进入缓存
             std::unique_ptr<RLruKCache<Key,size_t>>historyList_;//访问数据历史记录
             std::unordered_map<Key,Value>historyValueMap_;//存储未达到k次访问的数据值
+            
         public:
             RLruKCache(int capacity,int historyCapacity,int k)
                 :RLruCache<Key,Value>(capacity)
