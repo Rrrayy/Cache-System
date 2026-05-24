@@ -26,7 +26,7 @@ namespace RrCache{
                 if(inMainCache){
                     return value;
                 }
-                if(historyCount>=k){
+                if(historyCount>=k_){
                     auto it =historyValueMap_.find(key);
                     if(it!=historyValueMap_.end()){
                         Value storedValue=it->second;
@@ -53,7 +53,7 @@ namespace RrCache{
                 //保存值到历史记录映射，供后续get操作使用
                 historyValueMap_[key]=value;
                 //检查访问次数是否到达K
-                if(historyCount>=k){
+                if(historyCount>=k_){
                     historyList_->remove(key);
                     historyValueMap_.erase(key);
                     RLruCache<Key,Value>::put(key,value);
