@@ -11,6 +11,7 @@ namespace RrCache{
 
     template <typename Key,typename Value>
     class RLruCache: public cache_system<Key,Value>{
+        
         private:
         //改写1，将类型别名写在private里
         using LruNodeType=LruNode<Key,Value>;

@@ -11,6 +11,7 @@ namespace RrCache{
             int k_;//进入缓存的评判标准，如果数据被访问k次，则可进入缓存
             std::unique_ptr<RLruKCache<Key,size_t>>historyList_;//访问数据历史记录
             std::unordered_map<Key,Value>historyValueMap_;//存储未达到k次访问的数据值
+            
         public:
             RLruKCache(int capacity,int historyCapacity,int k)
                 :RLruCache<Key,Value>(capacity)
@@ -25,7 +26,7 @@ namespace RrCache{
                 if(inMainCache){
                     return value;
                 }
-                if(historyCount>=k){
+                if(historyCount>=k_){
                     auto it =historyValueMap_.find(key);
                     if(it!=historyValueMap_.end()){
                         Value storedValue=it->second;
@@ -52,7 +53,7 @@ namespace RrCache{
                 //保存值到历史记录映射，供后续get操作使用
                 historyValueMap_[key]=value;
                 //检查访问次数是否到达K
-                if(historyCount>=k){
+                if(historyCount>=k_){
                     historyList_->remove(key);
                     historyValueMap_.erase(key);
                     RLruCache<Key,Value>::put(key,value);
