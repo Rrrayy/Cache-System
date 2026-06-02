@@ -7,7 +7,8 @@
 ## 📊 测试结果
 
 ### 🧪 运行截图
-![alt text](2F0EE41022252F804600C1C4A32C92DF.png)
+<img width="984" height="873" alt="2F0EE41022252F804600C1C4A32C92DF" src="https://github.com/user-attachments/assets/806c7aca-ded5-4a9c-8847-baa8990715ba" />
+
 
 ### 📈 结果分析
 
