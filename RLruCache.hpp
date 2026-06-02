@@ -1,7 +1,6 @@
 #pragma once
 #include"cache_system.hpp"
 #include"LruNode.hpp"
-#include<iostream>
 #include<unordered_map>
 #include<mutex>
 #include<cstring>
@@ -27,28 +26,28 @@ namespace RrCache{
         void initializeList(){
             dummyHead_=std::make_shared<LruNodeType>(Key(),Value());
             dummyTail_=std::make_shared<LruNodeType>(Key(),Value());
-            dummyHead_->next_=dummyTail_;
-            dummyTail_->prev_=dummyHead_;
+            dummyHead_->getNext()=dummyTail_;
+            dummyTail_->getPrev()=dummyHead_;
         }
         //删除结点
         void removeNode(NodePtr node){
-            if(!node->prev_.expired()&&node->next_){
-                auto prev = node->prev_.lock();
-                prev->next_=node->next_;
-                node->next_->prev_=prev;
-                node->next_=nullptr;
+            if(!node->getPrev().expired()&&node->getNext()){
+                auto prev = node->getPrev().lock();
+                prev->getNext()=node->getNext();
+                node->getNext()->getPrev()=prev;
+                node->getNext()=nullptr;
             }
         }
         //从尾部插入节点
         void insertNode(NodePtr node){
-            node->next_=dummyTail_;
-            node->prev_=dummyTail_->prev_;
-            dummyTail_->prev_.lock()->next_=node;
-            dummyTail_->prev_=node;
+            node->getNext()=dummyTail_;
+            node->getPrev()=dummyTail_->getPrev();
+            dummyTail_->getPrev().lock()->getNext()=node;
+            dummyTail_->getPrev()=node;
         }
         //驱逐最近最少访问
         void evictLeastRecent(){
-            NodePtr leastRecent=dummyHead_->next_;
+            NodePtr leastRecent=dummyHead_->getNext();
             removeNode(leastRecent);
             nodeMap_.erase(leastRecent->getKey());
         }
