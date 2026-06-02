@@ -21,7 +21,11 @@ namespace RrCache{
         void setValue(const Value &value){value_=value;}
         size_t getAccessCount()const{return accesscount_;}
         void incrementAccessCount(){accesscount_++;}
-         
 
+        std::weak_ptr<LruNode<Key,Value>>& getPrev() { return prev_; }
+        const std::weak_ptr<LruNode<Key,Value>>& getPrev() const { return prev_; }
+        std::shared_ptr<LruNode<Key,Value>>& getNext() { return next_; }
+        const std::shared_ptr<LruNode<Key,Value>>& getNext() const { return next_; }
+         
     };
 }
