@@ -2,7 +2,6 @@
 
 [![C++17](https://img.shields.io/badge/C++-17-00599C?logo=cplusplus)]()
 [![License](https://img.shields.io/badge/license-MIT-blue)]()
-[![Build](https://img.shields.io/badge/build-CMake-passing-green)]()
 
 一个基于 C++17 模板的缓存策略库，提供六种缓存替换算法的完整实现。纯头文件、统一接口、内置线程安全。
 
