@@ -29,7 +29,7 @@ add_executable(
 target_include_directories(
     test_cache
     PRIVATE
-    .RArcCache
+    ${INCLUDE_DIRS}
 )
 
 install(
