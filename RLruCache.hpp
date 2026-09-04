@@ -58,7 +58,7 @@ namespace RrCache{
         }
         //添加新结点
         void addNewNode(const Key &key,const Value &value){
-            if(nodeMap_.size()>=capacity_){
+            if(nodeMap_.size()>=static_cast<std::size_t>(capacity_)){
                 evictLeastRecent();
             }
             NodePtr newNode=std::make_shared<LruNodeType>(key,value);
@@ -78,7 +78,7 @@ namespace RrCache{
         }
         ~RLruCache() override=default;
         //添加缓存
-        void put(Key key,Value value)override{
+        void put(const Key& key,const Value& value)override{
             if(capacity_<=0)
                 return;
             std::lock_guard<std::mutex> lock(mutex_);
@@ -89,7 +89,7 @@ namespace RrCache{
             }
             addNewNode(key,value);
         }
-        bool get(Key key,Value &value)override{
+        bool get(const Key& key,Value& value)override{
             std::lock_guard<std::mutex>lock(mutex_);
             auto it=nodeMap_.find(key);
             if(it!=nodeMap_.end()){
@@ -99,13 +99,13 @@ namespace RrCache{
             }
             return false;
         }
-        Value get(Key key)override{
+        Value get(const Key& key)override{
             Value value={};
             get(key,value);
             return value;
         }
         //删除指定元素
-        void remove(Key key){
+        void remove(const Key& key){
             std::lock_guard<std::mutex>lock(mutex_);
             auto it=nodeMap_.find(key);
             if(it!=nodeMap_.end()){
