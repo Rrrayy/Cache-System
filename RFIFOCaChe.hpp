@@ -4,6 +4,7 @@
 #include <mutex>
 #include <queue>
 #include <memory>
+#include <cstddef>
 
 namespace RrCache{
 
@@ -26,7 +27,7 @@ namespace RrCache{
         
         ~RFIFOCache() override = default;
 
-        void put(Key key, Value value) override{
+        void put(const Key& key, const Value& value) override{
             if(capacity_ <= 0)
                 return;
             
@@ -38,7 +39,7 @@ namespace RrCache{
                 return;
             }
             
-            if(cache_.size() >= capacity_){
+            if(cache_.size() >= static_cast<std::size_t>(capacity_)){
                 evict();
             }
             
@@ -46,16 +47,16 @@ namespace RrCache{
             orderQueue_.push(key);
         }
 
-        bool get(Key key, Value &value) override{
+        bool get(const Key& key, Value& value) override{
             std::lock_guard<std::mutex> lock(mutex_);
             auto it = cache_.find(key);
-            if(it != cache_.end()){
-                value = it->second;
-                return true;
+            if(it == cache_.end()){
+				return false;
             }
-            return false;
+            value=it->second;
+			return true;
         }
-        Value get(Key key) override{
+        Value get(const Key& key) override{
             Value value{};
             get(key, value);
             return value;
