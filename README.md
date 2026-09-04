@@ -3,349 +3,186 @@
 [![C++17](https://img.shields.io/badge/C++-17-00599C?logo=cplusplus)]()
 [![License](https://img.shields.io/badge/license-MIT-blue)]()
 
-一个基于 C++17 模板的缓存策略库，提供六种缓存替换算法的完整实现。纯头文件、统一接口、内置线程安全。
+基于 C++17 模板实现的缓存策略库，提供统一接口、七种缓存策略及可复现的对比测试。
 
----
+## 缓存策略
 
-## 目录
+| 策略 | 核心机制 | 适用场景 |
+|---|---|---|
+| FIFO | 按写入顺序淘汰 | 简单缓存、性能基线 |
+| LRU | 哈希表 + 双向链表 | 时间局部性明显 |
+| LFU | 按访问频次分组 | 热点稳定、访问倾斜 |
+| LFU-Aging | LFU + 频次衰减 | 热点会随时间变化 |
+| LRU-K | 历史准入 + 主 LRU | 过滤一次性访问 |
+| Hash-LRU | 多个独立 LRU 分片 | 高并发、降低锁竞争 |
+| ARC | LRU/LFU 分区 + 幽灵反馈 | 访问模式不固定 |
 
-- [背景与动机](#背景与动机)
-- [支持策略总览](#支持策略总览)
-- [快速开始](#快速开始)
-- [API 参考](#api-参考)
-- [策略选型指南](#策略选型指南)
-- [架构设计](#架构设计)
-- [算法详解](#算法详解)
-- [基准测试](#基准测试)
-- [构建与测试](#构建与测试)
-- [项目结构](#项目结构)
-- [License](#license)
+## 设计概览
 
----
-
-## 背景与动机
-
-缓存替换策略是计算机系统中的一个经典问题。从 CPU 的 TLB 替换到数据库的 Buffer Pool，从 CDN 的内容缓存到 Redis 的 key 淘汰，不同场景对缓存策略有不同的需求。
-
-业界已有的方案分为两类：
-
-- **内置在特定系统中**（Redis 的 volatile-lru/allkeys-lfu、MySQL 的 LRU 变体），与系统耦合，无法独立复用。
-- **通用缓存库**（Google Guava Cache、Caffeine），但主要是 Java 生态。
-
-本项目的设计目标：
-
-1. 覆盖从简单（FIFO）到复杂（ARC）的全频谱策略，方便对比和选型。
-2. 纯头文件 + 模板泛型，零运行时依赖，嵌入现有项目成本低。
-3. 内置频次衰减（LFU-Aging）和幽灵队列（ARC）等工业级优化，而非教科书简化版本。
-4. 提供统一的 benchmark 框架，在同一访问序列下对比各策略的真实表现。
-
-
-
-## 支持策略总览
-
-| 策略 | 核心数据结构 | 时间复杂度 | 适用场景 |
-|------|-------------|-----------|----------|
-| FIFO | 队列 + 哈希表 | O(1) | 基线对比，或对淘汰策略不敏感的场景 |
-| LRU | 双向链表 + 哈希表 | O(1) | 通用场景，时间局部性强 |
-| LRU-K | 两级 LRU（历史 + 主缓存） | O(1) | 需要过滤一次性访问的冷数据 |
-| Hash-LRU | N 个独立 LRU 分片 | O(1) 单分片 | 高并发读场景，降低锁竞争 |
-| LFU | 按频次组织的双向链表 | O(1) | 访问频次极度倾斜，热点稳定 |
-| ARC | LRU + LFU 双区 + 幽灵队列 | O(1) | 负载模式未知或经常变化 |
-
----
-
-## 快速开始
-
-```bash
-git clone https://github.com/Rrrayy/Cache-System.git
-cd Cache-System
-mkdir build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
-make -j4
-./bin/test_cache
-```
-
-或直接编译（无需 CMake）：
-
-```bash
-g++ -std=c++17 Rtest.cpp -o test_cache -I. -I./RArcCache -O2
-./test_cache
-```
-
----
-
-## API 参考
-
-### 基类接口
+所有策略基于统一模板接口：
 
 ```cpp
-template<typename Key, typename Value>
-class cache_system {
+template<typename Key,typename Value>
+class cache_system{
 public:
-    virtual ~cache_system() = default;
-    virtual void put(Key key, Value value) = 0;          // 插入或更新
-    virtual bool get(Key key, Value& value) = 0;         // 读取，未命中返回 false
-    virtual Value get(Key key) = 0;                      // 读取，未命中返回默认值
+	virtual ~cache_system()=default;
+
+	virtual void put(
+		const Key& key,
+		const Value& value
+	)=0;
+
+	virtual bool get(
+		const Key& key,
+		Value& value
+	)=0;
+
+	virtual Value get(
+		const Key& key
+	)=0;
 };
 ```
 
-### 各策略特有接口
-
-| 类 | 额外接口 | 说明 |
-|----|---------|------|
-| RLruCache | `remove(Key key)` | 删除指定键 |
-| RLfuCache | `purge()` | 清空所有缓存数据 |
-| RLfuCache (构造参数) | `RLfuCache(capacity, maxAverageNum)` | 第二个参数控制频次衰减触发阈值 |
-| RLruKCache (构造参数) | `RLruKCache(cap, historyCap, k)` | k 为进入主缓存所需的最小访问次数 |
-| RHashLruCache (构造参数) | `RHashLruCache(capacity, sliceNum)` | sliceNum 默认取 CPU 核心数 |
-| RArcCache (构造参数) | `RArcCache(capacity, transformThreshold)` | 第二个参数控制 LRU 晋升 LFU 的阈值 |
-
-### 使用示例
+推荐使用返回 `bool` 的查询接口，以区分缓存未命中和缓存值本身为默认值的情况。
 
 ```cpp
-#include "RLruCache.hpp"
-#include "RLfuCache.hpp"
-#include "RArcCache/RArcCache.hpp"
+#include"RLruCache.hpp"
 
-RrCache::RLruCache<std::string, int> lru(100);
-lru.put("key1", 42);
-lru.remove("key1");                                  // 显式删除
+RrCache::RLruCache<std::string,int> cache(100);
 
-RrCache::RLfuCache<int, std::string> lfu(100, 20000); // 频次衰减阈值 20000
-lfu.purge();                                           // 清空
+cache.put("answer",42);
 
-RrCache::RLruKCache<int, std::string> lruk(100, 1000, 2); // K=2
-RrCache::RArcCache<int, std::string> arc(200);             // 推荐默认
-RrCache::RFIFOCache<int, std::string> fifo(100);
+int value=0;
+if(cache.get("answer",value)){
+	std::cout<<value<<"\n";
+}
 ```
 
----
+## 核心实现
 
-## 策略选型指南
+### LRU
 
-```
-负载模式已知？
-  是
-  ├── 访问频率高度集中（20% 的 key 产生 80% 的访问）
-  │   └── LFU / LFU-Aging（带频次衰减，防止热点僵化）
-  ├── 时间局部性强（刚访问过很可能再访问）
-  │   └── LRU
-  ├── 存在大量一次性访问（扫库、爬虫场景）
-  │   └── LRU-K（K >= 2，过滤冷数据）
-  └── 顺序扫描居多
-      └── ARC（所有策略在此场景都有限，ARC 相对最好）
+使用哈希表平均 `O(1)` 定位节点，双向链表维护访问顺序。命中后将节点移动到最近使用端，容量满时淘汰最久未使用节点。
 
-负载模式不确定或经常变化？
-  └── ARC
+### LFU 与 Aging
 
-并发读极高？
-  └── Hash-LRU（分片数 = CPU 核心数）
+节点按照访问频次放入不同链表，并维护当前最低频次。淘汰时优先删除频次最低的节点，同频次下淘汰最早进入该频次链表的节点。
 
-只需一个最简单的缓存做 baseline？
-  └── FIFO
-```
+当平均访问频次超过阈值时触发频次衰减，降低历史热点长期占据缓存的影响。衰减过程需要遍历所有节点，复杂度为 `O(N)`。
 
----
+### LRU-K
 
-## 架构设计
+新数据先进入历史区，达到指定访问次数后再进入主 LRU，用于过滤扫描和一次性访问造成的缓存污染。
 
-### 类继承结构
+### Hash-LRU
 
-```
-cache_system<Key, Value>        （抽象接口）
-  |
-  +-- RFIFOCache<Key, Value>     （FIFO，不感知访问模式）
-  +-- RLruCache<Key, Value>      （LRU：双向链表 + 哈希表）
-  |     +-- RLruKCache<Key, Value>  （LRU-K：继承 LRU，增加历史准入）
-  +-- RLfuCache<Key, Value>      （LFU：按频次索引的链表）
-  +-- RHashLruCache<Key, Value>  （分片 LRU：封装 N 个独立 RLruCache）
-  +-- RArcCache<Key, Value>      （ARC：组合 ArcLruPart + ArcLfuPart）
+根据 key 的哈希值将请求路由到独立 LRU 分片：
+
+```text
+key
+→ hash(key)
+→ hash % shard_count
+→ 对应LRU分片
 ```
 
-### 节点模型
+不同分片拥有独立锁，可以降低多线程访问不同 key 时的锁竞争。代价是无法在分片之间共享空闲容量，命中率可能与全局 LRU 略有差异。
 
-每个缓存节点使用 `std::shared_ptr` 管理生命周期。前驱指针使用 `std::weak_ptr`，打断双向链表中 shared_ptr 之间的循环引用。
+### ARC
 
+本项目的 ARC 是基于幽灵反馈思想实现的 LRU/LFU 自适应混合策略：
+
+```text
+新数据进入LRU
+→ 达到访问门槛后迁移到LFU
+→ 淘汰的key进入对应幽灵缓存
+→ 根据幽灵命中动态调整两个分区容量
 ```
-+------------------+     +------------------+     +------------------+
-|  哨兵头节点       | --> |  数据节点(k,v)   | --> |  数据节点(k,v)   | --> 哨兵尾节点
-| (dummyHead)      | <-- | prev_(weak_ptr)  | <-- | prev_(weak_ptr)  |
-+------------------+     +------------------+     +------------------+
-```
 
-哨兵节点消除了链表操作中的所有空指针判断，减少热点路径上的分支。
+幽灵缓存只记录 key，不保存 value。LRU 与 LFU 的真实容量之和受总容量约束，同一个 key 只存在于一个真实分区。
 
----
+该实现并非论文 ARC 的严格复刻，详细设计见 [RArcCache/README.md](RArcCache/README.md)。
 
-## 算法详解
+## 构建
 
-### FIFO（RFIFOCache）
+环境要求：
 
-使用 `std::queue<Key>` 记录插入顺序。缓存满时淘汰队头元素。不感知访问频率和近期度，适合作为性能基线。
+- GCC 或 Clang
+- C++17
+- pthread
 
-### LRU（RLruCache）
-
-双向链表按最近访问时间排序。命中时，节点移至链表尾部（最近使用端）。淘汰时，移除链表头部节点（最近最少使用端）。`unordered_map` 提供 key 到节点的 O(1) 索引。
-
-### LRU-K（RLruKCache）
-
-继承 RLruCache，增加第二个 LRU 实例作为历史记录缓存。键在前 K-1 次访问时只记录频次，不缓存值。达到 K 次后，将数据从历史缓存晋升到主缓存。`historyValueMap_` 暂存尚未晋升的数据值，确保首次晋升时不丢失。
-
-K=2 时效果最实用：一次访问不缓存，第二次才进入主缓存，过滤扫库、爬虫等一次性访问。
-
-### LFU 带频次衰减（RLfuCache）
-
-按频次组织数据，每个频次对应一个双向链表（`FreqList`）。`freqToFreqList_` 提供频次到链表的 O(1) 映射，`minFreq_` 跟踪当前最低非空频次。
-
-命中时，节点从当前频次链表移除，追加到 freq+1 链表。若原链表变空且该频次是 minFreq_，则递增。
-
-**频次衰减**：当缓存平均访问频次超过阈值时，将所有节点的频次减半（最低为 1）。解决朴素 LFU 中早期热点长期占据缓存、无法响应负载变化的问题。阈值通过构造函数参数 `maxAverageNum` 配置，默认 1,000,000。
-
-### 分片 LRU（RHashLruCache）
-
-封装 N 个独立 RLruCache，每个管理 `ceil(capacity / N)` 个槽位。key 所属分片由 `hash(key) % N` 确定。分片数默认取 `std::thread::hardware_concurrency()`。
-
-分布均匀时，锁竞争降低到原来的 1/N。各分片独立向上取整，总有效容量可能比指定容量多 N-1 个槽位。
-
-### ARC（RArcCache）
-
-ARC 将缓存划分为四个区域：
-
-| 区域 | 内容 | 作用 |
-|------|------|------|
-| LRU 主区 | 近期访问的数据和值 | 保留时间局部性高的数据 |
-| LFU 主区 | 高频访问的数据和值 | 保留频次高的数据 |
-| LRU 幽灵区 | 从 LRU 主区淘汰的 key（仅元数据） | 反馈 LRU 侧容量是否不足 |
-| LFU 幽灵区 | 从 LFU 主区淘汰的 key（仅元数据） | 反馈 LFU 侧容量是否不足 |
-
-总容量在 LRU 和 LFU 之间动态划分。幽灵命中即触发容量调整：
-
-- LRU 幽灵命中 -> LRU 容量 +1，LFU 容量 -1
-- LFU 幽灵命中 -> LFU 容量 +1，LRU 容量 -1
-
-`transformThreshold_` 控制 LRU 侧数据被访问多少次后晋升到 LFU 侧，防止低频数据占用 LFU 容量。
-
-参考论文：Megiddo & Modha, "ARC: A Self-Tuning, Low Overhead Replacement Cache" (FAST '03)。
-
----
-
-## 基准测试
-
-所有测试在单线程、相同访问序列下运行，各策略使用独立缓存实例，对比命中率。
-
-运行截图：
-
-<img width="984" alt="benchmark" src="https://github.com/user-attachments/assets/806c7aca-ded5-4a9c-8847-baa8990715ba" />
-
-### 测试一：热点数据访问
-
-容量 20，总操作 500,000 次，70% 集中在 20 个热点键，30% 随机落在 5,000 个冷键。
-
-| 策略 | 命中率 |
-|------|--------|
-| LRU | 49.52% |
-| LFU | 66.76% |
-| ARC | 66.05% |
-| LRU-K | 53.69% |
-| LFU-Aging | **66.81%** |
-| FIFO | 37.30% |
-
-基于频次的策略（LFU、ARC）显著优于 LRU 和 FIFO。工作集能完全装入缓存时，频次预测能力优于近期度。
-
-### 测试二：循环扫描
-
-容量 50，总操作 200,000 次，60% 顺序遍历 500 个键，30% 随机跳跃，10% 范围外访问。
-
-| 策略 | 命中率 |
-|------|--------|
-| LRU | 4.50% |
-| LFU | 8.92% |
-| ARC | **9.54%** |
-| LRU-K | 7.72% |
-| LFU-Aging | 8.89% |
-| FIFO | 4.69% |
-
-顺序扫描下所有策略退化到接近冷启动水平。ARC 因幽灵队列的自适应能力略占优势。
-
-### 测试三：工作负载剧烈变化
-
-容量 30，总操作 80,000 次，分为 5 个阶段（热点 -> 大范围随机 -> 顺序扫描 -> 局部随机 -> 混合）。
-
-| 策略 | 命中率 |
-|------|--------|
-| LRU | 55.02% |
-| LFU | 36.57% |
-| ARC | **59.26%** |
-| LRU-K | 56.47% |
-| LFU-Aging | 37.05% |
-| FIFO | 53.83% |
-
-ARC 综合表现最优。纯 LFU 在此场景严重退化——早期阶段的频次累积污染了缓存状态，全局衰减来不及响应快速变化。
-
-### 结论
-
-| 场景 | 最优策略 | 要点 |
-|------|---------|------|
-| 热点集中访问 | LFU / LFU-Aging | 工作集可放入缓存时，频次优于近期度 |
-| 循环扫描 | ARC | 所有策略都低，ARC 相对最好 |
-| 负载突变 | ARC | LRU/LFU 自适应平衡的价值在此体现 |
-
-对于负载模式不确定的生产环境，**ARC 是推荐的默认策略**。
-
----
-
-## 构建与测试
-
-### 环境要求
-
-- C++17 或更高版本
-- CMake 3.10+（可选）
-
-### 构建
+直接编译：
 
 ```bash
-mkdir build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
-make -j4
+g++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -pthread \
+	Rtest.cpp -o test
 ```
 
-调试模式（启用 AddressSanitizer + UndefinedBehaviorSanitizer）：
+运行：
 
 ```bash
-cmake .. -DCMAKE_BUILD_TYPE=Debug
-make -j4
+./test
 ```
 
-### 直接编译
+也可以使用 CMake：
 
 ```bash
-g++ -std=c++17 Rtest.cpp -o test_cache -I. -I./RArcCache -O2
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel
 ```
 
----
+## 测试结果
+
+测试使用固定随机种子，所有策略执行相同的单线程请求序列。以下结果用于观察策略命中率，不代表生产环境性能。
+
+| 策略 | 热点访问 | 循环扫描 | 负载切换 |
+|---|---:|---:|---:|
+| LRU | 49.62% | 4.54% | 54.89% |
+| LFU | **66.71%** | **8.67%** | 38.40% |
+| ARC | 59.92% | 4.54% | 54.85% |
+| LRU-K | 54.72% | 8.41% | **56.87%** |
+| LFU-Aging | **66.71%** | **8.67%** | 38.40% |
+| FIFO | 37.31% | 4.59% | 53.93% |
+| Hash-LRU | 48.78% | 4.54% | 55.10% |
+
+结果表明：
+
+- 稳定热点场景下，LFU 的命中率最高。
+- 循环扫描场景下，LFU 和 LRU-K 的抗污染能力更好。
+- 负载切换场景下，LRU-K 表现最好。
+- Hash-LRU 的主要价值是降低多线程锁竞争，单线程测试无法体现其并发优势。
+- 当前测试未观察到 Aging 对命中率的影响，需要使用热点迁移专项场景继续验证。
 
 ## 项目结构
 
-```
+```text
 Cache-System/
-  cache_system.hpp           抽象接口基类
-  LruNode.hpp                链表节点（shared_ptr/weak_ptr）
-  RLruCache.hpp              LRU 实现
-  RLfuCache.hpp              LFU + 频次衰减
-  RLru-kCache.hpp            LRU-K + 历史缓存
-  RHashLruCache.hpp          分片 LRU（高并发优化）
-  RFIFOCaChe.hpp             FIFO 实现
-  RArcCache/
-    RArcCache.hpp            ARC 主控
-    RArcCacheNode.hpp        ARC 节点
-    RArcLruPart.hpp          ARC LRU 组件 + 幽灵队列
-    RArcLfuPart.hpp          ARC LFU 组件 + 幽灵队列
-    README.md                ARC 设计文档
-  Rtest.cpp                  基准测试程序
-  CMakeLists.txt             构建配置
+├── cache_system.hpp
+├── RFIFOCaChe.hpp
+├── LruNode.hpp
+├── RLruCache.hpp
+├── RLfuCache.hpp
+├── RLru-kCache.hpp
+├── RHashLruCache.hpp
+├── RArcCache/
+│   ├── RArcCache.hpp
+│   ├── RArcCacheNode.hpp
+│   ├── RArcLruPart.hpp
+│   ├── RArcLfuPart.hpp
+│   └── README.md
+├── Rtest.cpp
+└── CMakeLists.txt
 ```
 
----
+## 工程边界
+
+当前项目主要用于缓存算法学习、实现对比和并发设计实验，尚未包含：
+
+- TTL 与过期清理
+- 容量按字节计算
+- 持久化与故障恢复
+- 命中率等运行时指标
+- 严格的多线程性能基准
+- 生产级异常与内存分配策略
 
 ## License
 
