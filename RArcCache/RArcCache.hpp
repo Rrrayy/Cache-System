@@ -1,92 +1,123 @@
 #pragma once
 
-#include "../cache_system.hpp"
-#include "RArcLruPart.hpp"
-#include "RArcLfuPart.hpp"
-#include <memory>
+#include"../cache_system.hpp"
+#include"RArcLfuPart.hpp"
+#include"RArcLruPart.hpp"
 
-namespace RrCache 
-{
+#include<cstddef>
+#include<memory>
+#include<mutex>
 
-template<typename Key, typename Value>
-class RArcCache : public cache_system<Key, Value> 
-{
+namespace RrCache{
+
+template<typename Key,typename Value>
+class RArcCache:public cache_system<Key,Value>{
 public:
-    explicit RArcCache(size_t capacity = 10, size_t transformThreshold = 2)
-        : capacity_(capacity)
-        , transformThreshold_(transformThreshold)
-        , lruPart_(std::make_unique<ArcLruPart<Key, Value>>(capacity, transformThreshold))
-        , lfuPart_(std::make_unique<ArcLfuPart<Key, Value>>(capacity, transformThreshold))
-    {}
+	explicit RArcCache(
+		std::size_t capacity=10,
+		std::size_t transformThreshold=2)
+		:capacity_(capacity),
+		transformThreshold_(
+			transformThreshold==0
+				?1
+				:transformThreshold),
+		lruPart_(
+			std::make_unique<ArcLruPart<Key,Value>>(
+				(capacity+1)/2,
+				transformThreshold_,
+				capacity)),
+		lfuPart_(
+			std::make_unique<ArcLfuPart<Key,Value>>(
+				capacity/2,
+				transformThreshold_,
+				capacity)){}
 
-    ~RArcCache() override = default;
+	~RArcCache() override=default;
 
-    void put(Key key, Value value) override 
-    {
-        checkGhostCaches(key);
+	void put(
+		const Key& key,
+		const Value& value) override{
+		std::lock_guard<std::mutex> lock(mutex_);
 
-        // 检查 LFU 部分是否存在该键
-        bool inLfu = lfuPart_->contain(key);
-        // 更新 LRU 部分缓存
-        lruPart_->put(key, value);
-        // 如果 LFU 部分存在该键，则更新 LFU 部分
-        if (inLfu) 
-        {
-            lfuPart_->put(key, value);
-        }
-    }
+		if(capacity_==0){
+			return;
+		}
 
-    bool get(Key key, Value& value) override 
-    {
-        checkGhostCaches(key);
+		checkGhostCaches(key);
 
-        bool shouldTransform = false;
-        if (lruPart_->get(key, value, shouldTransform)) 
-        {
-            if (shouldTransform) 
-            {
-                lfuPart_->put(key, value);
-            }
-            return true;
-        }
-        return lfuPart_->get(key, value);
-    }
+		if(lfuPart_->contain(key)){
+			lfuPart_->put(key,value);
+			return;
+		}
 
-    Value get(Key key) override 
-    {
-        Value value{};
-        get(key, value);
-        return value;
-    }
+		if(lruPart_->put(key,value)){
+			return;
+		}
+
+		lfuPart_->put(key,value);
+	}
+
+	bool get(
+		const Key& key,
+		Value& value) override{
+		std::lock_guard<std::mutex> lock(mutex_);
+
+		if(capacity_==0){
+			return false;
+		}
+
+		checkGhostCaches(key);
+
+		bool shouldTransform=false;
+
+		if(lruPart_->get(
+			key,
+			value,
+			shouldTransform)){
+			if(shouldTransform&&
+				lfuPart_->put(key,value)){
+				lruPart_->remove(key);
+			}
+
+			return true;
+		}
+
+		return lfuPart_->get(key,value);
+	}
+
+	Value get(const Key& key) override{
+		Value value{};
+		get(key,value);
+		return value;
+	}
 
 private:
-    bool checkGhostCaches(Key key) 
-    {
-        bool inGhost = false;
-        if (lruPart_->checkGhost(key)) 
-        {
-            if (lfuPart_->decreaseCapacity()) 
-            {
-                lruPart_->increaseCapacity();
-            }
-            inGhost = true;
-        } 
-        else if (lfuPart_->checkGhost(key)) 
-        {
-            if (lruPart_->decreaseCapacity()) 
-            {
-                lfuPart_->increaseCapacity();
-            }
-            inGhost = true;
-        }
-        return inGhost;
-    }
+	bool checkGhostCaches(const Key& key){
+		if(lruPart_->checkGhost(key)){
+			if(lfuPart_->decreaseCapacity()){
+				lruPart_->increaseCapacity();
+			}
+
+			return true;
+		}
+
+		if(lfuPart_->checkGhost(key)){
+			if(lruPart_->decreaseCapacity()){
+				lfuPart_->increaseCapacity();
+			}
+
+			return true;
+		}
+
+		return false;
+	}
 
 private:
-    size_t capacity_;
-    size_t transformThreshold_;
-    std::unique_ptr<ArcLruPart<Key, Value>> lruPart_;
-    std::unique_ptr<ArcLfuPart<Key, Value>> lfuPart_;
+	std::size_t capacity_;
+	std::size_t transformThreshold_;
+	std::mutex mutex_;
+	std::unique_ptr<ArcLruPart<Key,Value>> lruPart_;
+	std::unique_ptr<ArcLfuPart<Key,Value>> lfuPart_;
 };
 
-} // namespace RrCache
+}

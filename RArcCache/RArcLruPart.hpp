@@ -1,222 +1,238 @@
 #pragma once
 
-#include "RArcCacheNode.hpp"
-#include <unordered_map>
-#include <mutex>
+#include"RArcCacheNode.hpp"
 
-namespace RrCache 
-{
+#include<cstddef>
+#include<list>
+#include<map>
+#include<memory>
+#include<mutex>
+#include<unordered_map>
 
-template<typename Key, typename Value>
-class ArcLruPart 
-{
+namespace RrCache{
+
+template<typename Key,typename Value>
+class ArcLfuPart{
 public:
-    using NodeType = ArcNode<Key, Value>;
-    using NodePtr = std::shared_ptr<NodeType>;
-    using NodeMap = std::unordered_map<Key, NodePtr>;
+	using NodeType=ArcNode<Key,Value>;
+	using NodePtr=std::shared_ptr<NodeType>;
+	using NodeMap=std::unordered_map<Key,NodePtr>;
+	using NodeList=std::list<NodePtr>;
+	using FreqMap=std::map<std::size_t,NodeList>;
+	using PositionMap=std::unordered_map<
+		Key,
+		typename NodeList::iterator
+	>;
+	using GhostList=std::list<Key>;
+	using GhostMap=std::unordered_map<
+		Key,
+		typename GhostList::iterator
+	>;
 
-    explicit ArcLruPart(size_t capacity, size_t transformThreshold)
-        : capacity_(capacity)
-        , ghostCapacity_(capacity)
-        , transformThreshold_(transformThreshold)
-    {
-        initializeLists();
-    }
+	ArcLfuPart(
+		std::size_t capacity,
+		std::size_t transformThreshold,
+		std::size_t ghostCapacity=0)
+		:capacity_(capacity),
+		ghostCapacity_(
+			ghostCapacity==0
+				?capacity
+				:ghostCapacity),
+		transformThreshold_(transformThreshold),
+		minFreq_(0){}
 
-    bool put(Key key, Value value) 
-    {
-        if (capacity_ == 0) return false;
-        
-        std::lock_guard<std::mutex> lock(mutex_);
-        auto it = mainCache_.find(key);
-        if (it != mainCache_.end()) 
-        {
-            return updateExistingNode(it->second, value);
-        }
-        return addNewNode(key, value);
-    }
+	bool put(const Key& key,const Value& value){
+		std::lock_guard<std::mutex> lock(mutex_);
 
-    bool get(Key key, Value& value, bool& shouldTransform) 
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        auto it = mainCache_.find(key);
-        if (it != mainCache_.end()) 
-        {
-            shouldTransform = updateNodeAccess(it->second);
-            value = it->second->getValue();
-            return true;
-        }
-        return false;
-    }
+		if(capacity_==0){
+			return false;
+		}
 
-    bool checkGhost(Key key) 
-    {
-        auto it = ghostCache_.find(key);
-        if (it != ghostCache_.end()) {
-            removeFromGhost(it->second);
-            ghostCache_.erase(it);
-            return true;
-        }
-        return false;
-    }
+		auto iter=mainCache_.find(key);
+		if(iter!=mainCache_.end()){
+			iter->second->setValue(value);
+			updateNodeFrequency(iter->second);
+			return true;
+		}
 
-    void increaseCapacity() { ++capacity_; }
-    
-    bool decreaseCapacity() 
-    {
-        if (capacity_ <= 0) return false;
-        if (mainCache_.size() == capacity_) {
-            evictLeastRecent();
-        }
-        --capacity_;
-        return true;
-    }
+		while(mainCache_.size()>=capacity_){
+			if(!evictLeastFrequent()){
+				return false;
+			}
+		}
 
-private:
-    void initializeLists() 
-    {
-        mainHead_ = std::make_shared<NodeType>();
-        mainTail_ = std::make_shared<NodeType>();
-        mainHead_->next_ = mainTail_;
-        mainTail_->prev_ = mainHead_;
+		NodePtr newNode=
+			std::make_shared<NodeType>(key,value);
 
-        ghostHead_ = std::make_shared<NodeType>();
-        ghostTail_ = std::make_shared<NodeType>();
-        ghostHead_->next_ = ghostTail_;
-        ghostTail_->prev_ = ghostHead_;
-    }
+		mainCache_[key]=newNode;
+		freqMap_[1].push_back(newNode);
+		nodePositions_[key]=
+			std::prev(freqMap_[1].end());
+		minFreq_=1;
+		return true;
+	}
 
-    bool updateExistingNode(NodePtr node, const Value& value) 
-    {
-        node->setValue(value);
-        moveToFront(node);
-        return true;
-    }
+	bool get(const Key& key,Value& value){
+		std::lock_guard<std::mutex> lock(mutex_);
 
-    bool addNewNode(const Key& key, const Value& value) 
-    {
-        if (mainCache_.size() >= capacity_) 
-        {   
-            evictLeastRecent(); // 驱逐最近最少访问
-        }
+		auto iter=mainCache_.find(key);
+		if(iter==mainCache_.end()){
+			return false;
+		}
 
-        NodePtr newNode = std::make_shared<NodeType>(key, value);
-        mainCache_[key] = newNode;
-        addToFront(newNode);
-        return true;
-    }
+		NodePtr node=iter->second;
+		value=node->getValue();
+		updateNodeFrequency(node);
+		return true;
+	}
 
-    bool updateNodeAccess(NodePtr node) 
-    {
-        moveToFront(node);
-        node->incrementAccessCount();
-        return node->getAccessCount() >= transformThreshold_;
-    }
+	bool contain(const Key& key){
+		std::lock_guard<std::mutex> lock(mutex_);
+		return mainCache_.find(key)!=mainCache_.end();
+	}
 
-    void moveToFront(NodePtr node) 
-    {
-        // 先从当前位置移除
-        if (!node->prev_.expired() && node->next_) {
-            auto prev = node->prev_.lock();
-            prev->next_ = node->next_;
-            node->next_->prev_ = node->prev_;
-            node->next_ = nullptr; // 清空指针，防止悬垂引用
-        }
-        
-        // 添加到头部
-        addToFront(node);
-    }
+	bool checkGhost(const Key& key){
+		std::lock_guard<std::mutex> lock(mutex_);
 
-    void addToFront(NodePtr node) 
-    {
-        node->next_ = mainHead_->next_;
-        node->prev_ = mainHead_;
-        mainHead_->next_->prev_ = node;
-        mainHead_->next_ = node;
-    }
+		auto iter=ghostCache_.find(key);
+		if(iter==ghostCache_.end()){
+			return false;
+		}
 
-    void evictLeastRecent() 
-    {
-        NodePtr leastRecent = mainTail_->prev_.lock();
-        if (!leastRecent || leastRecent == mainHead_) 
-            return;
+		ghostList_.erase(iter->second);
+		ghostCache_.erase(iter);
+		return true;
+	}
 
-        // 从主链表中移除
-        removeFromMain(leastRecent);
+	void increaseCapacity(){
+		std::lock_guard<std::mutex> lock(mutex_);
+		++capacity_;
+	}
 
-        // 添加到幽灵缓存
-        if (ghostCache_.size() >= ghostCapacity_) 
-        {
-            removeOldestGhost();
-        }
-        addToGhost(leastRecent);
+	bool decreaseCapacity(){
+		std::lock_guard<std::mutex> lock(mutex_);
 
-        // 从主缓存映射中移除
-        mainCache_.erase(leastRecent->getKey());
-    }
+		if(capacity_==0){
+			return false;
+		}
 
-    void removeFromMain(NodePtr node) 
-    {
-        if (!node->prev_.expired() && node->next_) {
-            auto prev = node->prev_.lock();
-            prev->next_ = node->next_;
-            node->next_->prev_ = node->prev_;
-            node->next_ = nullptr; // 清空指针，防止悬垂引用
-        }
-    }
+		--capacity_;
 
-    void removeFromGhost(NodePtr node) 
-    {
-        if (!node->prev_.expired() && node->next_) {
-            auto prev = node->prev_.lock();
-            prev->next_ = node->next_;
-            node->next_->prev_ = node->prev_;
-            node->next_ = nullptr; // 清空指针，防止悬垂引用
-        }
-    }
+		while(mainCache_.size()>capacity_){
+			if(!evictLeastFrequent()){
+				break;
+			}
+		}
 
-    void addToGhost(NodePtr node) 
-    {
-        // 重置节点的访问计数
-        node->accessCount_ = 1;
-        
-        // 添加到幽灵缓存的头部
-        node->next_ = ghostHead_->next_;
-        node->prev_ = ghostHead_;
-        ghostHead_->next_->prev_ = node;
-        ghostHead_->next_ = node;
-        
-        // 添加到幽灵缓存映射
-        ghostCache_[node->getKey()] = node;
-    }
-
-    void removeOldestGhost() 
-    {
-        // 使用lock()方法，并添加null检查
-        NodePtr oldestGhost = ghostTail_->prev_.lock();
-        if (!oldestGhost || oldestGhost == ghostHead_) 
-            return;
-
-        removeFromGhost(oldestGhost);
-        ghostCache_.erase(oldestGhost->getKey());
-    }
-    
+		return true;
+	}
 
 private:
-    size_t capacity_;
-    size_t ghostCapacity_;
-    size_t transformThreshold_; // 转换门槛值
-    std::mutex mutex_;
+	void updateNodeFrequency(const NodePtr& node){
+		std::size_t oldFreq=node->getAccessCount();
 
-    NodeMap mainCache_; // key -> ArcNode
-    NodeMap ghostCache_;
-    
-    // 主链表
-    NodePtr mainHead_;
-    NodePtr mainTail_;
-    // 淘汰链表
-    NodePtr ghostHead_;
-    NodePtr ghostTail_;
+		auto listIter=freqMap_.find(oldFreq);
+		auto positionIter=nodePositions_.find(node->getKey());
+
+		if(listIter!=freqMap_.end()&&
+			positionIter!=nodePositions_.end()){
+			listIter->second.erase(positionIter->second);
+
+			if(listIter->second.empty()){
+				freqMap_.erase(listIter);
+			}
+		}
+
+		node->incrementAccessCount();
+		std::size_t newFreq=node->getAccessCount();
+
+		freqMap_[newFreq].push_back(node);
+		nodePositions_[node->getKey()]=
+			std::prev(freqMap_[newFreq].end());
+
+		updateMinFreq();
+	}
+
+	bool evictLeastFrequent(){
+		if(freqMap_.empty()){
+			return false;
+		}
+
+		auto freqIter=freqMap_.begin();
+		NodeList& nodeList=freqIter->second;
+
+		if(nodeList.empty()){
+			freqMap_.erase(freqIter);
+			updateMinFreq();
+			return false;
+		}
+
+		NodePtr leastNode=nodeList.front();
+		Key key=leastNode->getKey();
+
+		nodeList.pop_front();
+		if(nodeList.empty()){
+			freqMap_.erase(freqIter);
+		}
+
+		nodePositions_.erase(key);
+		mainCache_.erase(key);
+		addToGhost(key);
+		updateMinFreq();
+		return true;
+	}
+
+	void updateMinFreq(){
+		if(freqMap_.empty()){
+			minFreq_=0;
+			return;
+		}
+
+		minFreq_=freqMap_.begin()->first;
+	}
+
+	void addToGhost(const Key& key){
+		if(ghostCapacity_==0){
+			return;
+		}
+
+		auto existingIter=ghostCache_.find(key);
+		if(existingIter!=ghostCache_.end()){
+			ghostList_.erase(existingIter->second);
+			ghostCache_.erase(existingIter);
+		}
+
+		while(ghostCache_.size()>=ghostCapacity_){
+			removeOldestGhost();
+		}
+
+		ghostList_.push_front(key);
+		ghostCache_[key]=ghostList_.begin();
+	}
+
+	void removeOldestGhost(){
+		if(ghostList_.empty()){
+			return;
+		}
+
+		const Key& key=ghostList_.back();
+		ghostCache_.erase(key);
+		ghostList_.pop_back();
+	}
+
+private:
+	std::size_t capacity_;
+	std::size_t ghostCapacity_;
+	std::size_t transformThreshold_;
+	std::size_t minFreq_;
+	std::mutex mutex_;
+
+	NodeMap mainCache_;
+	FreqMap freqMap_;
+	PositionMap nodePositions_;
+
+	GhostList ghostList_;
+	GhostMap ghostCache_;
 };
 
-} // namespace RrCache
+}
