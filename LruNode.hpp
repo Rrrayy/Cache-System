@@ -9,21 +9,22 @@ namespace RrCache{
     private:
         Key key_;
         Value value_;
-        size_t accesscount_;//访问次数
+        std::size_t accesscount_;//访问次数
         std::weak_ptr<LruNode<Key,Value>>prev_;//用weak_ptr打破循环引用
         std::shared_ptr<LruNode<Key,Value>>next_;
 
     public:
-        LruNode(Key key,Value value):key_(key),value_(value),accesscount_(1){}
+        LruNode(const Key& key,const Value& value):key_(key),value_(value),accesscount_(1){}
         //提供访问器
-        Key getKey() const{return key_;}
-        Value getValue() const {return value_;}
+        const Key& getKey() const{return key_;}
+        const Value& getValue() const {return value_;}
         void setValue(const Value &value){value_=value;}
-        size_t getAccessCount()const{return accesscount_;}
-        void incrementAccessCount(){accesscount_++;}
+        std::size_t getAccessCount() const{return accesscount_;}
+        void incrementAccessCount(){++accesscount_;}
 
         std::weak_ptr<LruNode<Key,Value>>& getPrev() { return prev_; }
         const std::weak_ptr<LruNode<Key,Value>>& getPrev() const { return prev_; }
+
         std::shared_ptr<LruNode<Key,Value>>& getNext() { return next_; }
         const std::shared_ptr<LruNode<Key,Value>>& getNext() const { return next_; }
          
